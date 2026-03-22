@@ -237,7 +237,11 @@ class BSBIIndex:
         with InvertedIndexReader(self.index_name, self.postings_encoding, directory=self.output_dir) as merged_index:
             N = len(merged_index.doc_length)
             scores = {}
+            seen = set()
             for word in preprocess(query):
+                if word in seen:
+                    continue
+                seen.add(word)
                 if word not in self.term_id_map.str_to_id:
                     continue
                 term = self.term_id_map[word]
@@ -295,7 +299,11 @@ class BSBIIndex:
             avgdl = sum(merged_index.doc_length.values()) / N
 
             scores = {}
+            seen  = set()
             for word in preprocess(query):
+                if word in seen:
+                    continue
+                seen.add(word)
                 if word not in self.term_id_map.str_to_id:
                     continue
                 term = self.term_id_map[word]
