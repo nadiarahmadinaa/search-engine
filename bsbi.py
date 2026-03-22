@@ -5,6 +5,7 @@ import contextlib
 import heapq
 import time
 import math
+from bisect import bisect_left
 
 from index import InvertedIndexReader, InvertedIndexWriter
 from util import IdMap, sorted_merge_posts_and_tfs
@@ -313,6 +314,167 @@ class BSBIIndex:
         docs = [(score, self.doc_id_map[doc_id]) for doc_id, score in scores.items()]
         return sorted(docs, key=lambda x: x[0], reverse=True)[:k]
 
+    def _store_upper_bounds(self, k1=1.2, b=0.75):
+        """
+        Compute and persist the BM25 upper bound for every term.
+
+        The upper bound for term t is:
+
+            UB(t) = IDF(t) * max over all D in postings(t) of tf_norm(t, D)
+
+        Iterates the merged index sequentially (one disk pass) and writes
+        the resulting upper_bounds dict back into the index metadata via
+        the context manager's __exit__ save.  Must be called after index()
+        has built the merged index.
+
+        Parameters
+        ----------
+        k1 : float
+            BM25 k1 parameter (must match the value used in retrieval).
+        b : float
+            BM25 b parameter (must match the value used in retrieval).
+        """
+        with InvertedIndexReader(self.index_name, self.postings_encoding,
+                                 directory=self.output_dir) as merged_index:
+            N     = len(merged_index.doc_length)
+            avgdl = sum(merged_index.doc_length.values()) / N
+
+            for term, postings, tf_list in tqdm(merged_index,
+                                                desc="Computing WAND upper bounds"):
+                df  = merged_index.postings_dict[term][1]
+                idf = math.log((N - df + 0.5) / (df + 0.5) + 1)
+                max_tf_norm = max(
+                    (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * merged_index.doc_length[doc_id] / avgdl))
+                    for doc_id, tf in zip(postings, tf_list)
+                )
+                merged_index.term_upper_bounds[term] = idf * max_tf_norm
+            # __exit__ saves term_upper_bounds into the .dict metadata file
+
+    def retrieve_bm25_wand(self, query, k=10, k1=1.2, b=0.75):
+        """
+        WAND (Weak AND) Top-K retrieval with BM25 scoring.
+
+        Uses precomputed per-term upper bounds stored in the index to
+        prune documents that cannot possibly enter the top-K heap, avoiding
+        a full BM25 evaluation for every document.
+
+        Algorithm (Broder et al., 2003):
+          1. Sort query-term cursors by their current docID.
+          2. Find the pivot: the first term where the cumulative UB sum
+             exceeds the current threshold (the K-th best score so far).
+          3. If the first cursor is already at pivot_doc → full eval:
+               compute true BM25 for pivot_doc, update heap and threshold.
+          4. Otherwise → skip: advance the first cursor to pivot_doc using
+               binary search (O(log n) per skip).
+          5. Repeat until no pivot can beat the threshold.
+
+        Parameters
+        ----------
+        query : str
+            Raw query string.
+        k : int
+            Number of top results to return.
+        k1 : float
+            BM25 TF saturation parameter.
+        b : float
+            BM25 length normalisation parameter.
+
+        Returns
+        -------
+        List[Tuple[float, str]]
+            Top-k (score, doc_path) pairs sorted by descending score.
+        """
+        if len(self.term_id_map) == 0 or len(self.doc_id_map) == 0:
+            self.load()
+
+        with InvertedIndexReader(self.index_name, self.postings_encoding,
+                                 directory=self.output_dir) as merged_index:
+            N     = len(merged_index.doc_length)
+            avgdl = sum(merged_index.doc_length.values()) / N
+
+            # Collect unique in-vocabulary query terms
+            seen = set()
+            query_terms = []
+            for word in preprocess(query):
+                if word in self.term_id_map.str_to_id:
+                    term = self.term_id_map[word]
+                    if term in merged_index.postings_dict and term not in seen:
+                        query_terms.append(term)
+                        seen.add(term)
+
+            if not query_terms:
+                return []
+
+            # Load all postings into memory; initialise cursors
+            postings_data = {}          # term -> (postings_list, tf_list)
+            cursors       = {}          # term -> current position (int)
+            upper_bounds  = {}          # term -> UB float
+            for term in query_terms:
+                postings_data[term] = merged_index.get_postings_list(term)
+                cursors[term]       = 0
+                upper_bounds[term]  = merged_index.term_upper_bounds.get(term, float('inf'))
+
+            # Min-heap of size ≤ k  →  heap[0] is the weakest score kept
+            heap      = []   # entries: (score, doc_id)
+            threshold = 0.0
+
+            while True:
+                # Active terms: those with remaining postings
+                active = [t for t in query_terms
+                          if cursors[t] < len(postings_data[t][0])]
+                if not active:
+                    break
+
+                # Sort active terms by their current docID (ascending)
+                active.sort(key=lambda t: postings_data[t][0][cursors[t]])
+
+                # Find pivot: first term where cumulative UB > threshold
+                cum_ub     = 0.0
+                pivot_idx  = -1
+                for i, t in enumerate(active):
+                    cum_ub += upper_bounds[t]
+                    if cum_ub > threshold:
+                        pivot_idx = i
+                        break
+
+                if pivot_idx == -1:
+                    break   # no document can beat the threshold
+
+                pivot_doc = postings_data[active[pivot_idx]][0][cursors[active[pivot_idx]]]
+
+                if postings_data[active[0]][0][cursors[active[0]]] == pivot_doc:
+                    # All terms 0..pivot_idx are at pivot_doc → full evaluation
+                    score = 0.0
+                    for t in active:
+                        pos = cursors[t]
+                        pl, tfl = postings_data[t]
+                        if pos < len(pl) and pl[pos] == pivot_doc:
+                            tf      = tfl[pos]
+                            dl      = merged_index.doc_length[pivot_doc]
+                            df      = merged_index.postings_dict[t][1]
+                            idf     = math.log((N - df + 0.5) / (df + 0.5) + 1)
+                            tf_norm = (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * dl / avgdl))
+                            score  += idf * tf_norm
+                            cursors[t] = pos + 1   # advance past pivot_doc
+
+                    # Update top-K heap
+                    if len(heap) < k:
+                        heapq.heappush(heap, (score, pivot_doc))
+                        if len(heap) == k:
+                            threshold = heap[0][0]
+                    elif score > heap[0][0]:
+                        heapq.heapreplace(heap, (score, pivot_doc))
+                        threshold = heap[0][0]
+
+                else:
+                    # First cursor is before pivot_doc → skip forward with bisect
+                    first = active[0]
+                    pl    = postings_data[first][0]
+                    cursors[first] = bisect_left(pl, pivot_doc, cursors[first])
+
+        docs = [(score, self.doc_id_map[doc_id]) for score, doc_id in heap]
+        return sorted(docs, key=lambda x: x[0], reverse=True)
+
     def index(self):
         """
         Base indexing code
@@ -339,6 +501,8 @@ class BSBIIndex:
                 indices = [stack.enter_context(InvertedIndexReader(index_id, self.postings_encoding, directory=self.output_dir))
                                for index_id in self.intermediate_indices]
                 self.merge(indices, merged_index)
+
+        self._store_upper_bounds()
 
 
 if __name__ == "__main__":
