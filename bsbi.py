@@ -1,4 +1,5 @@
 import os
+import re
 import pickle
 import contextlib
 import heapq
@@ -7,8 +8,37 @@ import math
 
 from index import InvertedIndexReader, InvertedIndexWriter
 from util import IdMap, sorted_merge_posts_and_tfs
-from compression import StandardPostings, VBEPostings
+from compression import StandardPostings, VBEPostings, EliasGammaPostings
 from tqdm import tqdm
+
+# ---------------------------------------------------------------------------
+# Text preprocessing
+# ---------------------------------------------------------------------------
+
+from nltk.corpus import stopwords
+from nltk.stem import PorterStemmer
+
+_STOPWORDS = set(stopwords.words('english'))
+_STEMMER   = PorterStemmer()
+
+
+def preprocess(text):
+    """
+    Tokenize, lowercase, remove stopwords, and stem text using NLTK's
+    Porter Stemmer and English stopword list.
+
+    Parameters
+    ----------
+    text : str
+        Raw document or query text.
+
+    Returns
+    -------
+    List[str]
+        Preprocessed tokens ready for indexing or lookup.
+    """
+    tokens = re.findall(r'[a-z]+', text.lower())
+    return [_STEMMER.stem(t) for t in tokens if t not in _STOPWORDS]
 
 class BSBIIndex:
     """
@@ -88,7 +118,7 @@ class BSBIIndex:
         for filename in next(os.walk(dir))[2]:
             docname = dir + "/" + filename
             with open(docname, "r", encoding = "utf8", errors = "surrogateescape") as f:
-                for token in f.read().split():
+                for token in preprocess(f.read()):
                     td_pairs.append((self.term_id_map[token], self.doc_id_map[docname]))
 
         return td_pairs
@@ -203,25 +233,85 @@ class BSBIIndex:
         if len(self.term_id_map) == 0 or len(self.doc_id_map) == 0:
             self.load()
 
-        terms = [self.term_id_map[word] for word in query.split()]
         with InvertedIndexReader(self.index_name, self.postings_encoding, directory=self.output_dir) as merged_index:
+            N = len(merged_index.doc_length)
+            scores = {}
+            for word in preprocess(query):
+                if word not in self.term_id_map.str_to_id:
+                    continue
+                term = self.term_id_map[word]
+                if term not in merged_index.postings_dict:
+                    continue
+                df = merged_index.postings_dict[term][1]
+                postings, tf_list = merged_index.get_postings_list(term)
+                for doc_id, tf in zip(postings, tf_list):
+                    if tf > 0:
+                        scores[doc_id] = scores.get(doc_id, 0) + \
+                            math.log(N / df) * (1 + math.log(tf))
+
+            docs = [(score, self.doc_id_map[doc_id]) for doc_id, score in scores.items()]
+            return sorted(docs, key=lambda x: x[0], reverse=True)[:k]
+
+    def retrieve_bm25(self, query, k=10, k1=1.2, b=0.75):
+        """
+        Ranked retrieval using Okapi BM25 (Robertson et al., 1994).
+
+        Scoring is TaaT (Term-at-a-Time). For each query term t:
+
+            IDF(t)    = log((N - df + 0.5) / (df + 0.5) + 1)
+
+            tf_norm   = tf(t,D) * (k1 + 1)
+                        ─────────────────────────────────────────
+                        tf(t,D) + k1 * (1 - b + b * |D| / avgdl)
+
+            Score(D)  += IDF(t) * tf_norm
+
+        Document lengths (|D|) are precomputed at index time and stored in
+        merged_index.doc_length.  avgdl is derived from those values.
+
+        Parameters
+        ----------
+        query : str
+            Raw query string (same preprocessing as indexing is applied).
+        k : int
+            Number of top results to return.
+        k1 : float
+            TF saturation parameter (typical range 1.2 – 2.0).
+        b : float
+            Length normalisation parameter (0 = none, 1 = full).
+
+        Returns
+        -------
+        List[Tuple[float, str]]
+            Top-k (score, doc_path) pairs sorted by descending score.
+        """
+        if len(self.term_id_map) == 0 or len(self.doc_id_map) == 0:
+            self.load()
+
+        with InvertedIndexReader(self.index_name, self.postings_encoding,
+                                 directory=self.output_dir) as merged_index:
+            N     = len(merged_index.doc_length)
+            avgdl = sum(merged_index.doc_length.values()) / N
 
             scores = {}
-            for term in terms:
-                if term in merged_index.postings_dict:
-                    df = merged_index.postings_dict[term][1]
-                    N = len(merged_index.doc_length)
-                    postings, tf_list = merged_index.get_postings_list(term)
-                    for i in range(len(postings)):
-                        doc_id, tf = postings[i], tf_list[i]
-                        if doc_id not in scores:
-                            scores[doc_id] = 0
-                        if tf > 0:
-                            scores[doc_id] += math.log(N / df) * (1 + math.log(tf))
+            for word in preprocess(query):
+                if word not in self.term_id_map.str_to_id:
+                    continue
+                term = self.term_id_map[word]
+                if term not in merged_index.postings_dict:
+                    continue
 
-            # Top-K
-            docs = [(score, self.doc_id_map[doc_id]) for (doc_id, score) in scores.items()]
-            return sorted(docs, key = lambda x: x[0], reverse = True)[:k]
+                df  = merged_index.postings_dict[term][1]
+                idf = math.log((N - df + 0.5) / (df + 0.5) + 1)
+                postings, tf_list = merged_index.get_postings_list(term)
+
+                for doc_id, tf in zip(postings, tf_list):
+                    dl      = merged_index.doc_length[doc_id]
+                    tf_norm = (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * dl / avgdl))
+                    scores[doc_id] = scores.get(doc_id, 0) + idf * tf_norm
+
+        docs = [(score, self.doc_id_map[doc_id]) for doc_id, score in scores.items()]
+        return sorted(docs, key=lambda x: x[0], reverse=True)[:k]
 
     def index(self):
         """
