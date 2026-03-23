@@ -1,6 +1,7 @@
 import re
 import math
 from bsbi import BSBIIndex
+from spimi import SPIMIIndex
 from compression import VBEPostings
 
 
@@ -147,7 +148,7 @@ def load_qrels(qrel_file="qrels.txt", max_q_id=30, max_doc_id=1033):
 ######## >>>>> evaluation
 
 
-def eval(qrels, query_file="queries.txt", k=1000):
+def eval(qrels, query_file="queries.txt", k=1000, indexer="bsbi"):
     """
     Evaluate TF-IDF and BM25 against all queries using four metrics:
     RBP, DCG, NDCG, and AP (MAP).
@@ -160,14 +161,21 @@ def eval(qrels, query_file="queries.txt", k=1000):
         Path to the queries file.
     k : int
         Number of top results to retrieve per query.
+    indexer : str
+        Which indexer to evaluate: "bsbi" (default) or "spimi".
     """
-    BSBI_instance = BSBIIndex(data_dir='collection',
+    if indexer == "spimi":
+        instance = SPIMIIndex(data_dir='collection',
                               postings_encoding=VBEPostings,
-                              output_dir='index')
+                              output_dir='index_spimi')
+    else:
+        instance = BSBIIndex(data_dir='collection',
+                             postings_encoding=VBEPostings,
+                             output_dir='index')
 
     methods = {
-        'TF-IDF': BSBI_instance.retrieve_tfidf,
-        'BM25':   BSBI_instance.retrieve_bm25,
+        'TF-IDF': instance.retrieve_tfidf,
+        'BM25':   instance.retrieve_bm25,
     }
 
     for method_name, retrieve_fn in methods.items():
@@ -190,7 +198,7 @@ def eval(qrels, query_file="queries.txt", k=1000):
                 ndcg_scores.append(ndcg(ranking, n_rel))
                 ap_scores.append(ap(ranking, n_rel))
 
-        print(f"\nEvaluasi {method_name} terhadap 30 queries (top-{k}):")
+        print(f"\n[{indexer.upper()}] {method_name} — 30 queries, top-{k}:")
         print(f"  RBP  = {sum(rbp_scores)  / len(rbp_scores):.4f}")
         print(f"  DCG  = {sum(dcg_scores)  / len(dcg_scores):.4f}")
         print(f"  NDCG = {sum(ndcg_scores) / len(ndcg_scores):.4f}")
@@ -198,17 +206,26 @@ def eval(qrels, query_file="queries.txt", k=1000):
 
 
 if __name__ == '__main__':
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--indexer", choices=["bsbi", "spimi", "both"],
+                        default="both",
+                        help="Indexer to evaluate (default: both)")
+    args = parser.parse_args()
+
     qrels = load_qrels()
 
     assert qrels["Q1"][166] == 1, "qrels salah"
     assert qrels["Q1"][300] == 0, "qrels salah"
 
     # Sanity-check metrics on a known ranking
-    # ranking [1,0,1] with 3 relevant docs total
     assert abs(dcg([1, 0, 1]) - (1/math.log2(2) + 1/math.log2(4))) < 1e-9
-    assert ndcg([1, 0, 1], n_relevant=3) < 1.0   # not perfect
-    assert ndcg([1, 1, 1], n_relevant=3) == 1.0   # perfect
+    assert ndcg([1, 0, 1], n_relevant=3) < 1.0
+    assert ndcg([1, 1, 1], n_relevant=3) == 1.0
     assert abs(ap([1, 0, 1], n_relevant=2) - (1/1 + 2/3) / 2) < 1e-9
     print("Semua assertion metric passed.\n")
 
-    eval(qrels)
+    indexers = ["bsbi", "spimi"] if args.indexer == "both" else [args.indexer]
+    for idx in indexers:
+        eval(qrels, indexer=idx)
