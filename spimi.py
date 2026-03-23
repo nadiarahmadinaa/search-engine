@@ -167,6 +167,18 @@ class SPIMIIndex(BSBIIndex):
         self._store_upper_bounds()
 
     # ------------------------------------------------------------------
+    # PRF helpers — override BSBI's integer-key versions
+    # ------------------------------------------------------------------
+
+    def _str_to_term(self, word):
+        """SPIMI: term key IS the string token — identity function."""
+        return word
+
+    def _term_to_str(self, term):
+        """SPIMI: term is already a string — identity function."""
+        return term
+
+    # ------------------------------------------------------------------
     # Retrieval helpers
     # ------------------------------------------------------------------
 

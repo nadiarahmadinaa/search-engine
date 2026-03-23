@@ -51,6 +51,7 @@ def run_queries(inst, queries, method, k):
         'tfidf': inst.retrieve_tfidf,
         'bm25':  inst.retrieve_bm25,
         'wand':  inst.retrieve_bm25_wand,
+        'prf':   inst.retrieve_bm25_prf,
     }[method]
 
     for query in queries:
@@ -65,7 +66,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--indexer", choices=["bsbi", "spimi"], default="spimi",
                         help="Which indexer to use (default: spimi)")
-    parser.add_argument("--method", choices=["tfidf", "bm25", "wand"], default="bm25",
+    parser.add_argument("--method", choices=["tfidf", "bm25", "wand", "prf"], default="bm25",
                         help="Retrieval method (default: bm25)")
     parser.add_argument("--k", type=int, default=10,
                         help="Number of results to return (default: 10)")

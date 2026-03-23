@@ -483,6 +483,123 @@ class BSBIIndex:
         docs = [(score, self.doc_id_map[doc_id]) for score, doc_id in heap]
         return sorted(docs, key=lambda x: x[0], reverse=True)
 
+    # ------------------------------------------------------------------
+    # PRF helpers — overridden by SPIMIIndex for string-key indices
+    # ------------------------------------------------------------------
+
+    def _str_to_term(self, word):
+        """
+        Convert a preprocessed string token to the term key used in
+        postings_dict.  For BSBI this is an integer termID; SPIMIIndex
+        overrides this to return the string directly.
+
+        Returns None if the word is not in the vocabulary.
+        """
+        return self.term_id_map.str_to_id.get(word)
+
+    def _term_to_str(self, term):
+        """
+        Convert a term key (integer termID in BSBI) back to its string
+        form.  SPIMIIndex overrides this to be the identity function.
+        """
+        return self.term_id_map[term]   # int -> str via id_to_str
+
+    # ------------------------------------------------------------------
+    # Pseudo-Relevance Feedback (Rocchio)
+    # ------------------------------------------------------------------
+
+    def retrieve_bm25_prf(self, query, k=10, top_fb=10, n_terms=10,
+                          alpha=1.0, beta=0.75):
+        """
+        BM25 retrieval with Pseudo-Relevance Feedback (Rocchio).
+
+        Two-phase retrieval:
+          Phase 1 — retrieve top_fb documents with BM25 (assumed relevant).
+          Phase 2 — expand the query using Rocchio's formula, re-retrieve.
+
+        Rocchio (no negative feedback term):
+            q_new = alpha * q_orig
+                  + beta * (1/|R|) * sum_{d in R} tfidf(d)
+
+        The top n_terms dimensions of q_new become the expanded query.
+
+        Parameters
+        ----------
+        query : str
+            Raw query string.
+        k : int
+            Final number of results to return.
+        top_fb : int
+            Number of top documents used as pseudo-relevant feedback.
+        n_terms : int
+            Number of expansion terms selected from the Rocchio vector.
+        alpha : float
+            Weight on original query (default 1.0).
+        beta : float
+            Weight on feedback centroid (default 0.75).
+
+        Returns
+        -------
+        List[Tuple[float, str]]
+            Top-k (score, doc_path) pairs sorted by descending score.
+
+        References
+        ----------
+        Rocchio (1971); Manning et al., IIR Ch. 9.
+        """
+        # Phase 1: initial BM25 retrieval (also triggers map load)
+        initial = self.retrieve_bm25(query, k=top_fb)
+        if not initial:
+            return []
+
+        # Map retrieved doc paths → integer doc_ids
+        fb_doc_ids = set()
+        for _, doc_path in initial:
+            did = self.doc_id_map.str_to_id.get(doc_path)
+            if did is not None:
+                fb_doc_ids.add(did)
+
+        with InvertedIndexReader(self.index_name, self.postings_encoding,
+                                 directory=self.output_dir) as idx:
+            N = len(idx.doc_length)
+
+            # --- query vector: {str_term: idf_weight} ---
+            query_vec = {}
+            for word in set(preprocess(query)):
+                term = self._str_to_term(word)
+                if term is not None and term in idx.postings_dict:
+                    df = idx.postings_dict[term][1]
+                    query_vec[word] = math.log(N / df)
+
+            # --- feedback centroid via sequential scan ---
+            # For each term, accumulate log-TF * IDF over feedback docs.
+            # Sequential iteration avoids random seeks inside the loop.
+            centroid = {}
+            for term, postings, tf_list in idx:
+                for doc_id, tf in zip(postings, tf_list):
+                    if doc_id in fb_doc_ids:
+                        df = idx.postings_dict[term][1]
+                        idf = math.log(N / df)
+                        tfidf = (1 + math.log(tf)) * idf
+                        word = self._term_to_str(term)
+                        centroid[word] = centroid.get(word, 0.0) + tfidf
+
+        # Normalise centroid by number of feedback docs
+        n_fb = len(fb_doc_ids)
+        for w in centroid:
+            centroid[w] /= n_fb
+
+        # Rocchio combination
+        all_terms = set(query_vec) | set(centroid)
+        expanded = {t: alpha * query_vec.get(t, 0.0) +
+                       beta  * centroid.get(t, 0.0)
+                    for t in all_terms}
+
+        top_terms = sorted(expanded, key=expanded.get, reverse=True)[:n_terms]
+
+        # Phase 2: re-retrieve with expanded query
+        return self.retrieve_bm25(' '.join(top_terms), k=k)
+
     def index(self):
         """
         Base indexing code

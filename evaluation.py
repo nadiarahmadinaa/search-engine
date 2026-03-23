@@ -174,8 +174,9 @@ def eval(qrels, query_file="queries.txt", k=1000, indexer="bsbi"):
                              output_dir='index')
 
     methods = {
-        'TF-IDF': instance.retrieve_tfidf,
-        'BM25':   instance.retrieve_bm25,
+        'TF-IDF':   instance.retrieve_tfidf,
+        'BM25':     instance.retrieve_bm25,
+        'BM25+PRF': instance.retrieve_bm25_prf,
     }
 
     for method_name, retrieve_fn in methods.items():
