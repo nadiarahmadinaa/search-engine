@@ -10,6 +10,8 @@ from bisect import bisect_left
 from index import InvertedIndexReader, InvertedIndexWriter
 from util import IdMap, sorted_merge_posts_and_tfs
 from compression import StandardPostings, VBEPostings, EliasGammaPostings
+from positional_index import (PositionalIndexWriter, PositionalIndexReader,
+                               positional_intersect)
 from tqdm import tqdm
 
 # ---------------------------------------------------------------------------
@@ -599,6 +601,144 @@ class BSBIIndex:
 
         # Phase 2: re-retrieve with expanded query
         return self.retrieve_bm25(' '.join(top_terms), k=k)
+
+    # ------------------------------------------------------------------
+    # Positional Index
+    # ------------------------------------------------------------------
+
+    _POSITIONAL_INDEX_NAME = "positional_index"
+
+    def build_positional_index(self):
+        """
+        Build a positional inverted index over the entire corpus.
+
+        Makes a single pass through all documents, tracking the token-level
+        position of each term (in the preprocessed stream, i.e. after
+        stopword removal and stemming).  Terms are stored as raw strings —
+        no global term-ID map is needed.
+
+        The resulting index is written to
+        <output_dir>/positional_index.{index,dict}.
+
+        Must be called after the main index has been built (so that
+        doc_id_map is populated and can be loaded).
+        """
+        if len(self.doc_id_map) == 0:
+            self.load()
+
+        # {str_term: {doc_id: [positions]}}
+        term_pos = {}
+
+        for block_dir in tqdm(sorted(next(os.walk(self.data_dir))[1]),
+                              desc="Building positional index"):
+            dir_path = "./" + self.data_dir + "/" + block_dir
+            for filename in sorted(next(os.walk(dir_path))[2]):
+                doc_path = dir_path + "/" + filename
+                doc_id   = self.doc_id_map.str_to_id.get(doc_path)
+                if doc_id is None:
+                    continue  # doc not in main index (shouldn't happen)
+
+                with open(doc_path, 'r', encoding='utf8',
+                          errors='surrogateescape') as f:
+                    tokens = preprocess(f.read())
+
+                for pos, token in enumerate(tokens):
+                    if token not in term_pos:
+                        term_pos[token] = {}
+                    if doc_id not in term_pos[token]:
+                        term_pos[token][doc_id] = []
+                    term_pos[token][doc_id].append(pos)
+
+        with PositionalIndexWriter(self._POSITIONAL_INDEX_NAME, VBEPostings,
+                                   directory=self.output_dir) as writer:
+            for term in sorted(term_pos.keys()):
+                sorted_docs    = sorted(term_pos[term].keys())
+                tf_list        = [len(term_pos[term][d]) for d in sorted_docs]
+                positions_list = [term_pos[term][d]      for d in sorted_docs]
+                writer.append(term, sorted_docs, tf_list, positions_list)
+
+    def retrieve_phrase(self, phrase_query, k=10):
+        """
+        Exact-phrase retrieval using the positional inverted index.
+
+        Preprocesses the phrase with the same pipeline as indexing (so
+        stopwords are removed and tokens are stemmed), then uses pairwise
+        positional intersection to find documents where all phrase tokens
+        appear consecutively in the preprocessed token stream.
+
+        Falls back to BM25 for single-token queries (no phrase to match).
+
+        Parameters
+        ----------
+        phrase_query : str
+            The phrase to search for (e.g. "lipid metabolism").
+        k : int
+            Number of results to return, ranked by phrase-occurrence count.
+
+        Returns
+        -------
+        List[Tuple[int, str]]
+            (phrase_count, doc_path) pairs, sorted by descending count.
+        """
+        if len(self.doc_id_map) == 0:
+            self.load()
+
+        words = preprocess(phrase_query)
+        if not words:
+            return []
+        if len(words) == 1:
+            return self.retrieve_bm25(phrase_query, k=k)
+
+        pos_idx_file = os.path.join(
+            self.output_dir,
+            self._POSITIONAL_INDEX_NAME + '.index'
+        )
+        if not os.path.exists(pos_idx_file):
+            raise FileNotFoundError(
+                "Positional index not found. "
+                "Run build_positional_index() first."
+            )
+
+        with PositionalIndexReader(self._POSITIONAL_INDEX_NAME, VBEPostings,
+                                   directory=self.output_dir) as pos_idx:
+            # Bail out early if any phrase word is not indexed
+            for word in words:
+                if word not in pos_idx.postings_dict:
+                    return []
+
+            # Load positional postings for all phrase words
+            pdata = {w: pos_idx.get_postings_list_positional(w) for w in words}
+
+        # Seed with first word: [(doc_id, [phrase_start_positions])]
+        posts0, _, pos0 = pdata[words[0]]
+        current = list(zip(posts0, pos0))
+
+        # Pairwise positional intersect for each subsequent word
+        for offset, word in enumerate(words[1:], start=1):
+            posts_w, _, pos_w = pdata[word]
+            next_lookup = dict(zip(posts_w, pos_w))
+            new_current = []
+            for doc_id, phrase_starts in current:
+                if doc_id not in next_lookup:
+                    continue
+                npos = next_lookup[doc_id]
+                valid = []
+                j = 0
+                for ps in phrase_starts:
+                    target = ps + offset
+                    while j < len(npos) and npos[j] < target:
+                        j += 1
+                    if j < len(npos) and npos[j] == target:
+                        valid.append(ps)
+                if valid:
+                    new_current.append((doc_id, valid))
+            current = new_current
+            if not current:
+                return []
+
+        results = [(len(phrase_starts), self.doc_id_map[doc_id])
+                   for doc_id, phrase_starts in current]
+        return sorted(results, reverse=True)[:k]
 
     def index(self):
         """
