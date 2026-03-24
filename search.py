@@ -46,6 +46,14 @@ def build_index(indexer, output_dir):
     return inst
 
 
+def ensure_lsi_index(inst, output_dir):
+    """Build LSI index if not already present."""
+    if not os.path.exists(os.path.join(output_dir, "lsi_index.pkl")):
+        print("LSI index not found — building now ...")
+        inst.build_lsi_index()
+        print("Done.\n")
+
+
 def ensure_positional_index(inst, output_dir):
     """Build positional index if not already present."""
     pos_file = os.path.join(output_dir, "positional_index.index")
@@ -62,6 +70,7 @@ def run_queries(inst, queries, method, k):
         'wand':   inst.retrieve_bm25_wand,
         'prf':    inst.retrieve_bm25_prf,
         'phrase': inst.retrieve_phrase,
+        'lsi':    inst.retrieve_lsi,
     }[method]
 
     for query in queries:
@@ -76,7 +85,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--indexer", choices=["bsbi", "spimi"], default="spimi",
                         help="Which indexer to use (default: spimi)")
-    parser.add_argument("--method", choices=["tfidf", "bm25", "wand", "prf", "phrase"], default="bm25",
+    parser.add_argument("--method", choices=["tfidf", "bm25", "wand", "prf", "phrase", "lsi"], default="bm25",
                         help="Retrieval method (default: bm25)")
     parser.add_argument("--k", type=int, default=10,
                         help="Number of results to return (default: 10)")
@@ -88,4 +97,6 @@ if __name__ == "__main__":
     inst = build_index(args.indexer, output_dir)
     if args.method == "phrase":
         ensure_positional_index(inst, output_dir)
+    if args.method == "lsi":
+        ensure_lsi_index(inst, output_dir)
     run_queries(inst, QUERIES, args.method, args.k)

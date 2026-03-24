@@ -603,6 +603,130 @@ class BSBIIndex:
         return self.retrieve_bm25(' '.join(top_terms), k=k)
 
     # ------------------------------------------------------------------
+    # Latent Semantic Index
+    # ------------------------------------------------------------------
+
+    _LSI_INDEX_NAME = "lsi_index.pkl"
+
+    def build_lsi_index(self, n_components=100):
+        """
+        Build a Latent Semantic Index over the merged inverted index.
+
+        Constructs a log-TF·IDF term-document matrix (n_docs × n_terms),
+        applies TruncatedSVD to find k latent topics, and stores
+        L2-normalised document vectors for cosine-similarity retrieval.
+
+        The fitted model is pickled to <output_dir>/lsi_index.pkl so it
+        survives across sessions without recomputing.
+
+        Parameters
+        ----------
+        n_components : int
+            Number of SVD dimensions.  Default 100; must be less than
+            min(n_docs, n_terms).
+
+        References
+        ----------
+        Deerwester et al. (1990) — "Indexing by latent semantic analysis".
+        Manning et al., IIR Ch. 18.
+        """
+        from lsi import LSIIndex
+        from scipy.sparse import lil_matrix
+        import numpy as np
+
+        if len(self.doc_id_map) == 0:
+            self.load()
+
+        with InvertedIndexReader(self.index_name, self.postings_encoding,
+                                 directory=self.output_dir) as idx:
+            N       = len(idx.doc_length)
+            n_terms = len(idx.terms)
+
+            # Map each term key → column index (order = idx.terms order)
+            term_to_col = {term: col for col, term in enumerate(idx.terms)}
+
+            # Build sparse log-TF·IDF matrix  (n_docs × n_terms)
+            X = lil_matrix((N, n_terms), dtype=np.float32)
+
+            for term, postings, tf_list in tqdm(idx,
+                                                total=n_terms,
+                                                desc="Building TF-IDF matrix"):
+                col = term_to_col[term]
+                df  = len(postings)
+                idf = math.log(N / df)
+                for doc_id, tf in zip(postings, tf_list):
+                    X[doc_id, col] = (1 + math.log(tf)) * idf
+
+        X = X.tocsr()
+
+        # doc_id_list[i] = path for matrix row i  (doc IDs are 0-indexed)
+        doc_id_list = [self.doc_id_map[i] for i in range(N)]
+
+        k = min(n_components, N - 1, n_terms - 1)
+        lsi = LSIIndex(n_components=k)
+        lsi.build(X, term_to_col, doc_id_list)
+        lsi.save(os.path.join(self.output_dir, self._LSI_INDEX_NAME))
+        self._lsi = lsi
+
+    def _get_lsi(self):
+        """Load or return cached LSIIndex."""
+        if getattr(self, '_lsi', None) is not None:
+            return self._lsi
+        from lsi import LSIIndex
+        path = os.path.join(self.output_dir, self._LSI_INDEX_NAME)
+        if not os.path.exists(path):
+            raise FileNotFoundError(
+                "LSI index not found. Run build_lsi_index() first."
+            )
+        self._lsi = LSIIndex.load(path)
+        return self._lsi
+
+    def retrieve_lsi(self, query, k=10):
+        """
+        LSI ranked retrieval using cosine similarity in latent space.
+
+        Builds a log-IDF query vector (TF=1 for each unique query term),
+        projects it into the SVD latent space, and ranks documents by
+        cosine similarity.
+
+        Parameters
+        ----------
+        query : str
+            Raw query string (same preprocessing as indexing).
+        k : int
+            Number of results to return.
+
+        Returns
+        -------
+        List[Tuple[float, str]]
+            (cosine_score, doc_path) sorted by descending score.
+        """
+        import numpy as np
+
+        if len(self.doc_id_map) == 0:
+            self.load()
+
+        lsi = self._get_lsi()
+
+        with InvertedIndexReader(self.index_name, self.postings_encoding,
+                                 directory=self.output_dir) as idx:
+            N         = len(idx.doc_length)
+            n_terms   = len(lsi.term_to_col)
+            query_vec = np.zeros(n_terms, dtype=np.float32)
+
+            for word in set(preprocess(query)):
+                term = self._str_to_term(word)
+                if term is None or term not in idx.postings_dict:
+                    continue
+                if term not in lsi.term_to_col:
+                    continue
+                col             = lsi.term_to_col[term]
+                df              = idx.postings_dict[term][1]
+                query_vec[col]  = math.log(N / df)   # IDF weight, TF=1
+
+        return lsi.retrieve(query_vec, k=k)
+
+    # ------------------------------------------------------------------
     # Positional Index
     # ------------------------------------------------------------------
 
