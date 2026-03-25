@@ -179,6 +179,29 @@ class SPIMIIndex(BSBIIndex):
         return term
 
     # ------------------------------------------------------------------
+    # Patricia Trie — override for string-keyed SPIMI index
+    # ------------------------------------------------------------------
+
+    def _get_term_trie(self):
+        """
+        Build a PatriciaTrie from the SPIMI merged index string terms.
+
+        Unlike BSBI, SPIMI has no term_id_map — the vocabulary comes
+        directly from the merged index postings_dict keys (already strings).
+        """
+        if getattr(self, '_term_trie', None) is not None:
+            return self._term_trie
+        from patricia_trie import PatriciaTrie
+        self._load_if_needed()
+        trie = PatriciaTrie()
+        with InvertedIndexReader(self.index_name, self.postings_encoding,
+                                 directory=self.output_dir) as idx:
+            for term in idx.postings_dict:
+                trie.insert(term, None)
+        self._term_trie = trie
+        return trie
+
+    # ------------------------------------------------------------------
     # Retrieval helpers
     # ------------------------------------------------------------------
 

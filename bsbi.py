@@ -864,6 +864,106 @@ class BSBIIndex:
                    for doc_id, phrase_starts in current]
         return sorted(results, reverse=True)[:k]
 
+    # ------------------------------------------------------------------
+    # Patricia Trie — prefix / wildcard retrieval
+    # ------------------------------------------------------------------
+
+    def _get_term_trie(self):
+        """
+        Return a PatriciaTrie over the string vocabulary (lazily built,
+        then cached on this instance).
+
+        For BSBI the vocabulary comes from term_id_map.str_to_id.
+        SPIMIIndex overrides this to read string terms directly from
+        the merged index postings_dict.
+        """
+        if getattr(self, '_term_trie', None) is not None:
+            return self._term_trie
+        from patricia_trie import PatriciaTrie
+        if len(self.term_id_map) == 0:
+            self.load()
+        trie = PatriciaTrie()
+        for word in self.term_id_map.str_to_id:
+            trie.insert(word, None)
+        self._term_trie = trie
+        return trie
+
+    def get_terms_by_prefix(self, prefix: str):
+        """
+        Return all vocabulary strings that start with *prefix*.
+
+        Uses the Patricia Trie for O(|prefix| + output) lookup.
+
+        Parameters
+        ----------
+        prefix : str
+            Literal prefix to search for.
+
+        Returns
+        -------
+        List[str]
+            Matching vocabulary terms (stemmed/preprocessed form).
+        """
+        return [t for t, _ in self._get_term_trie().get_terms_by_prefix(prefix)]
+
+    def retrieve_prefix(self, query: str, k=10):
+        """
+        BM25 retrieval with prefix expansion.
+
+        Each preprocessed query token is expanded to all vocabulary terms
+        sharing that prefix via the Patricia Trie, then BM25 is run on
+        the expanded token set.
+
+        Parameters
+        ----------
+        query : str
+            Raw query string; each token is used as a prefix.
+        k : int
+            Number of top results to return.
+
+        Returns
+        -------
+        List[Tuple[float, str]]
+            Top-k (score, doc_path) pairs sorted by descending score.
+        """
+        trie = self._get_term_trie()
+        expanded = set()
+        for word in preprocess(query):
+            for t, _ in trie.get_terms_by_prefix(word):
+                expanded.add(t)
+        if not expanded:
+            return []
+        return self.retrieve_bm25(' '.join(expanded), k=k)
+
+    def retrieve_wildcard(self, pattern: str, k=10):
+        """
+        BM25 retrieval with wildcard expansion.
+
+        Each space-separated token in *pattern* is treated as an fnmatch
+        wildcard (* and ?) against the vocabulary via the Patricia Trie.
+        Matched terms are merged and scored with BM25.
+
+        Parameters
+        ----------
+        pattern : str
+            Wildcard query, e.g. ``"lipi* metab*"`` or ``"inf?mm*"``.
+        k : int
+            Number of top results to return.
+
+        Returns
+        -------
+        List[Tuple[float, str]]
+            Top-k (score, doc_path) pairs sorted by descending score.
+        """
+        trie = self._get_term_trie()
+        expanded = set()
+        for token in pattern.split():
+            for t, _ in trie.wildcard_search(token):
+                expanded.add(t)
+        if not expanded:
+            return []
+        return self.retrieve_bm25(' '.join(expanded), k=k)
+
     def index(self):
         """
         Base indexing code

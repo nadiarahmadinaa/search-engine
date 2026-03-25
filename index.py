@@ -159,6 +159,55 @@ class InvertedIndexReader(InvertedIndex):
         tf_list = self.postings_encoding.decode_tf(self.index_file.read(len_in_bytes_of_tf))
         return (postings_list, tf_list)
 
+    # ------------------------------------------------------------------
+    # Patricia Trie — prefix / wildcard term lookup
+    # ------------------------------------------------------------------
+
+    def _build_trie(self):
+        """Lazily build a PatriciaTrie over all string terms in postings_dict."""
+        if getattr(self, '_trie', None) is not None:
+            return
+        from patricia_trie import PatriciaTrie
+        self._trie = PatriciaTrie()
+        for term in self.postings_dict:
+            self._trie.insert(str(term), term)
+
+    def get_terms_by_prefix(self, prefix: str):
+        """
+        Return all (string_term, raw_key) pairs whose string form starts
+        with *prefix*, using the Patricia Trie for O(|prefix|+output) time.
+
+        Parameters
+        ----------
+        prefix : str
+            Literal prefix to match.
+
+        Returns
+        -------
+        List[Tuple[str, Any]]
+            (string_term, raw_postings_key) pairs.
+        """
+        self._build_trie()
+        return self._trie.get_terms_by_prefix(prefix)
+
+    def wildcard_search(self, pattern: str):
+        """
+        Return all (string_term, raw_key) pairs whose string form matches
+        the fnmatch *pattern* (* and ? wildcards).
+
+        Parameters
+        ----------
+        pattern : str
+            fnmatch-style pattern, e.g. ``lipi*`` or ``inf?mm*``.
+
+        Returns
+        -------
+        List[Tuple[str, Any]]
+            (string_term, raw_postings_key) pairs.
+        """
+        self._build_trie()
+        return self._trie.wildcard_search(pattern)
+
 
 class InvertedIndexWriter(InvertedIndex):
     """

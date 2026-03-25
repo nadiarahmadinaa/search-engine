@@ -65,12 +65,14 @@ def ensure_positional_index(inst, output_dir):
 
 def run_queries(inst, queries, method, k):
     retrieve = {
-        'tfidf':  inst.retrieve_tfidf,
-        'bm25':   inst.retrieve_bm25,
-        'wand':   inst.retrieve_bm25_wand,
-        'prf':    inst.retrieve_bm25_prf,
-        'phrase': inst.retrieve_phrase,
-        'lsi':    inst.retrieve_lsi,
+        'tfidf':    inst.retrieve_tfidf,
+        'bm25':     inst.retrieve_bm25,
+        'wand':     inst.retrieve_bm25_wand,
+        'prf':      inst.retrieve_bm25_prf,
+        'phrase':   inst.retrieve_phrase,
+        'lsi':      inst.retrieve_lsi,
+        'prefix':   inst.retrieve_prefix,
+        'wildcard': inst.retrieve_wildcard,
     }[method]
 
     for query in queries:
@@ -85,7 +87,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--indexer", choices=["bsbi", "spimi"], default="spimi",
                         help="Which indexer to use (default: spimi)")
-    parser.add_argument("--method", choices=["tfidf", "bm25", "wand", "prf", "phrase", "lsi"], default="bm25",
+    parser.add_argument("--method", choices=["tfidf", "bm25", "wand", "prf", "phrase", "lsi",
+                                               "prefix", "wildcard"], default="bm25",
                         help="Retrieval method (default: bm25)")
     parser.add_argument("--k", type=int, default=10,
                         help="Number of results to return (default: 10)")
