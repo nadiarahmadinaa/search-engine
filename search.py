@@ -17,7 +17,7 @@ import os
 
 from bsbi import BSBIIndex
 from spimi import SPIMIIndex
-from compression import VBEPostings
+from postings_encoding import VBEPostings
 
 QUERIES = [
     "alkylated with radioactive iodoacetate",
@@ -92,14 +92,18 @@ if __name__ == "__main__":
                         help="Retrieval method (default: bm25)")
     parser.add_argument("--k", type=int, default=10,
                         help="Number of results to return (default: 10)")
+    parser.add_argument("--query", type=str, default=None,
+                        help="Custom query string (overrides built-in query list)")
     args = parser.parse_args()
 
     output_dir = "index_spimi" if args.indexer == "spimi" else "index"
     os.makedirs(output_dir, exist_ok=True)
+
+    queries = [args.query] if args.query else QUERIES
 
     inst = build_index(args.indexer, output_dir)
     if args.method == "phrase":
         ensure_positional_index(inst, output_dir)
     if args.method == "lsi":
         ensure_lsi_index(inst, output_dir)
-    run_queries(inst, QUERIES, args.method, args.k)
+    run_queries(inst, queries, args.method, args.k)

@@ -29,7 +29,7 @@ from tqdm import tqdm
 
 from index import InvertedIndexReader, InvertedIndexWriter
 from util import IdMap, sorted_merge_posts_and_tfs
-from compression import VBEPostings
+from postings_encoding import VBEPostings
 from bsbi import BSBIIndex, preprocess
 
 

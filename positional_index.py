@@ -26,7 +26,7 @@ Zobel & Moffat (2006) — "Inverted files for text search engines", ACM Surveys.
 import os
 import pickle
 
-from compression import VBEPostings
+from postings_encoding import VBEPostings
 from index import InvertedIndex
 
 

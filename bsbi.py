@@ -9,7 +9,7 @@ from bisect import bisect_left
 
 from index import InvertedIndexReader, InvertedIndexWriter
 from util import IdMap, sorted_merge_posts_and_tfs
-from compression import StandardPostings, VBEPostings, EliasGammaPostings
+from postings_encoding import StandardPostings, VBEPostings, EliasGammaPostings
 from positional_index import (PositionalIndexWriter, PositionalIndexReader,
                                positional_intersect)
 from tqdm import tqdm

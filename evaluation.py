@@ -1,8 +1,9 @@
+import os
 import re
 import math
 from bsbi import BSBIIndex
 from spimi import SPIMIIndex
-from compression import VBEPostings
+from postings_encoding import VBEPostings
 
 
 ######## >>>>> IR metrics
@@ -172,6 +173,13 @@ def eval(qrels, query_file="queries.txt", k=1000, indexer="bsbi"):
         instance = BSBIIndex(data_dir='collection',
                              postings_encoding=VBEPostings,
                              output_dir='index')
+
+    # Auto-build LSI index if missing
+    lsi_path = os.path.join(instance.output_dir, instance._LSI_INDEX_NAME)
+    if not os.path.exists(lsi_path):
+        print(f"[{indexer.upper()}] LSI index not found — building now ...")
+        instance.build_lsi_index()
+        print("Done.\n")
 
     methods = {
         'TF-IDF':   instance.retrieve_tfidf,
